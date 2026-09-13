@@ -1,7 +1,5 @@
 #include "semaphore.h"
-
-static inline void cli(void) { __asm__ volatile ("cli"); }
-static inline void sti(void) { __asm__ volatile ("sti"); }
+#include "irq.h"
 
 void sem_init(sem_t *s, int init_count) {
     s->count = init_count;
@@ -9,36 +7,36 @@ void sem_init(sem_t *s, int init_count) {
 }
 
 void sem_wait(sem_t *s) {
-    cli();
+    uint32_t flags = irq_save();
     s->count--;
 
     if (s->count < 0) {
-        
-        current_thread->next_wait = 0;
-        if (!s->waitq) {
-            s->waitq = current_thread;
-        } else {
-            thread_t *curr = s->waitq;
-            while (curr->next_wait) {
-                curr = curr->next_wait;
+        if (current_thread) {
+            current_thread->next_wait = 0;
+            if (!s->waitq) {
+                s->waitq = current_thread;
+            } else {
+                thread_t *curr = s->waitq;
+                while (curr->next_wait) {
+                    curr = curr->next_wait;
+                }
+                curr->next_wait = current_thread;
             }
-            curr->next_wait = current_thread;
+
+            irq_restore(flags);
+            thread_block();
+            return;
         }
-
-        sti();
-        thread_block();
-
-    } else {
-        sti();
     }
+
+    irq_restore(flags);
 }
 
 void sem_signal(sem_t *s) {
-    cli();
+    uint32_t flags = irq_save();
     s->count++;
 
     if (s->count <= 0) {
-
         if (s->waitq) {
             thread_t *w = s->waitq;
             s->waitq = s->waitq->next_wait;
@@ -46,5 +44,6 @@ void sem_signal(sem_t *s) {
             thread_unblock(w);
         }
     }
-    sti();
+    
+    irq_restore(flags);
 }
