@@ -5,3 +5,4 @@ build/
 seng21213.img
 os-image.bin
 .vscode/
+Dockerfile
