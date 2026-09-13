@@ -1,8 +1,8 @@
 [BITS 32]
 GLOBAL context_switch
+GLOBAL default_irq_handler
 
 context_switch:
-
     pushad
     pushfd
     
@@ -15,3 +15,13 @@ context_switch:
     popfd
     popad
     ret                         
+
+default_irq_handler:
+    pushad
+    
+    ; Send End Of Interrupt (EOI) command to PIC Master
+    mov al, 0x20
+    out 0x20, al
+    
+    popad
+    iretd                  
