@@ -1,26 +1,27 @@
 /* =============================================================================
- * SENG21213-OS :: Main Kernel  (Stages 0, 1, 2, and 3 Integrated)
+ * SENG21213-OS :: Main Kernel  (Stages 0, 1, 2, 3, and 4 Integrated)
  * File   : kernel/kernel.c
  *
  * PURPOSE
- *   1. Initialises VGA text-mode display and keyboard driver[cite: 2]
- *   2. Sets up Round-Robin process scheduling structures (Stage 1)[cite: 2]
- *   3. Initializes thread management, mutex locks, and semaphores (Stage 2)[cite: 2]
- *   4. Initializes physical page frame allocator (PMM) (Stage 3)[cite: 2]
- *   5. Runs interactive shell ("ksh") with robust string dispatching[cite: 2]
+ *   1. Initialises VGA text-mode display and keyboard driver[cite: 9]
+ *   2. Loads 32-bit IDT and masks PIC to prevent hardware faults[cite: 9]
+ *   3. Sets up Round-Robin process scheduling structures (Stage 1)[cite: 9]
+ *   4. Initializes thread management, mutex locks, and semaphores (Stage 2)[cite: 9]
+ *   5. Initializes physical page frame allocator (PMM) (Stage 3)[cite: 9]
+ *   6. Initializes RAM Disk and Virtual File System (Stage 4)
+ *   7. Runs interactive shell ("ksh") with robust command dispatching[cite: 9]
  * ============================================================================*/
 
 #include "vga.h"
 #include "keyboard.h"
 #include "../include/types.h"
-
-/* Milestone Subsystem Headers */
 #include "process.h"
 #include "irq.h"
 #include "thread.h"
 #include "mutex.h"
 #include "semaphore.h"
 #include "pmm.h"
+#include "fs.h"
 
 /* ---------------------------------------------------------------------------
  * Forward declarations of shell commands
@@ -35,6 +36,8 @@ static void cmd_threads(void);
 static void cmd_test_mutex(void);
 static void cmd_test_pc(void);
 static void cmd_free(void);
+static void cmd_ls(void);
+static void cmd_cat(const char *filename);
 
 /* ---------------------------------------------------------------------------
  * Minimal String Utilities
@@ -60,7 +63,6 @@ static const char *k_ltrim(const char *s) {
     return s;
 }
 
-/* Helper to convert positive integer to decimal string */
 static void k_itoa(int val, char *buf) {
     if (val == 0) {
         buf[0] = '0';
@@ -86,7 +88,6 @@ static void k_itoa(int val, char *buf) {
 static void print_splash(void) {
     vga_clear(VGA_BLACK);
 
-    /* Top banner box */
     vga_draw_box(0, 0, 7, 80, VGA_LIGHT_MAGENTA);
 
     vga_set_cursor(1, 2);
@@ -94,7 +95,7 @@ static void print_splash(void) {
                    VGA_YELLOW, VGA_BLACK);
 
     vga_set_cursor(2, 2);
-    vga_puts_color("  Stages 0-3: Scheduling, Threads, Concurrency & Memory Management", 
+    vga_puts_color("  Stages 0-4: Scheduling, Threads, Concurrency, PMM & File System", 
                    VGA_LIGHT_CYAN, VGA_BLACK);
 
     vga_set_cursor(3, 2);
@@ -118,7 +119,6 @@ static void print_splash(void) {
  * Stage 2 Concurrency Test Routines
  * --------------------------------------------------------------------------*/
 
-/* Test 1: myglobal Race Condition */
 static volatile int test_myglobal = 0;
 static mutex_t test_lock;
 
@@ -141,7 +141,6 @@ static void worker_safe(void) {
 static void cmd_test_mutex(void) {
     vga_puts_color("\n  [Stage 2] Running Mutex Test...\n", VGA_YELLOW, VGA_BLACK);
 
-    /* 1. Run without Mutex */
     test_myglobal = 0;
     worker_unsafe();
     worker_unsafe();
@@ -151,7 +150,6 @@ static void cmd_test_mutex(void) {
     vga_puts(buf);
     vga_puts(" / 40\n");
 
-    /* 2. Run with Mutex */
     test_myglobal = 0;
     mutex_init(&test_lock);
     worker_safe();
@@ -162,7 +160,6 @@ static void cmd_test_mutex(void) {
     vga_puts_color(" / 40 (OK)\n\n", VGA_LIGHT_GREEN, VGA_BLACK);
 }
 
-/* Test 2: Bounded-Buffer Producer-Consumer (Buffer Size = 5) */
 #define TEST_BUF_SIZE 5
 static int pc_buf[TEST_BUF_SIZE];
 static int pc_in = 0, pc_out = 0;
@@ -178,7 +175,6 @@ static void cmd_test_pc(void) {
     pc_in = 0;
     pc_out = 0;
 
-    /* Produce 3 items */
     for (int i = 1; i <= 3; i++) {
         sem_wait(&e_slots);
         sem_wait(&s_mutex);
@@ -188,8 +184,7 @@ static void cmd_test_pc(void) {
         sem_signal(&n_items);
     }
     vga_puts("  Produced: 3 items (10, 20, 30)\n");
-
-    /* Consume 2 items */
+    
     for (int i = 0; i < 2; i++) {
         sem_wait(&n_items);
         sem_wait(&s_mutex);
@@ -201,7 +196,6 @@ static void cmd_test_pc(void) {
     }
     vga_puts("  Consumed: 2 items (10, 20)\n");
 
-    /* Status verification */
     vga_puts_color("  Semaphore State: items = ", VGA_LIGHT_GREEN, VGA_BLACK);
     char ch[16];
     k_itoa(n_items.count, ch);
@@ -223,7 +217,6 @@ static void cmd_free(void) {
     vga_puts("  Total RAM        : 16 MB\n");
     vga_puts("  Managed frames   : 4096 frames\n");
 
-    /* Run Lecture 11 frame reuse verification test */
     uint32_t f[10];
     for (int i = 0; i < 10; i++) {
         f[i] = pmm_alloc_frame();
@@ -241,7 +234,6 @@ static void cmd_free(void) {
         vga_puts_color("  PMM Frame Alloc  : ACTIVE\n\n", VGA_YELLOW, VGA_BLACK);
     }
 
-    /* Clean up allocated test frames */
     for (int i = 0; i < 10; i++) {
         if (i != 3 && i != 7) pmm_free_frame(f[i]);
     }
@@ -262,18 +254,15 @@ static void cmd_ps(void) {
         if (process_table[i].pid != 0) {
             char buf[16];
 
-            /* PID */
             vga_puts("   ");
             k_itoa(process_table[i].pid, buf);
             vga_puts(buf);
             vga_puts("    ");
 
-            /* Name */
             vga_puts(process_table[i].name);
             int pad = 15 - k_strlen(process_table[i].name);
             while (pad-- > 0) vga_puts(" ");
 
-            /* State */
             int st = process_table[i].state;
             if (st >= 0 && st <= 3) {
                 vga_puts(state_names[st]);
@@ -282,7 +271,6 @@ static void cmd_ps(void) {
             }
             vga_puts("      ");
 
-            /* Priority */
             k_itoa(process_table[i].priority, buf);
             vga_puts(buf);
             vga_puts("\n");
@@ -294,6 +282,58 @@ static void cmd_ps(void) {
 static void cmd_threads(void) {
     vga_puts_color("\n  Kernel Threads Subsystem active.\n", VGA_LIGHT_GREEN, VGA_BLACK);
     vga_puts("  Run 'test_mutex' or 'test_pc' to run concurrency tests.\n\n");
+}
+
+/* ---------------------------------------------------------------------------
+ * Stage 4 File System Commands (ls, cat)
+ * --------------------------------------------------------------------------*/
+static void cmd_ls(void) {
+    vga_puts_color("\n  FILENAME        SIZE (BYTES)\n", VGA_LIGHT_CYAN, VGA_BLACK);
+    vga_puts("  -----------------------------\n");
+
+    int count = 0;
+    for (int i = 0; i < fs_get_count(); i++) {
+        const fs_node_t *node = fs_get_node(i);
+        if (node && node->used) {
+            vga_puts("  ");
+            vga_puts(node->name);
+            int pad = 16 - k_strlen(node->name);
+            while (pad-- > 0) vga_puts(" ");
+
+            char sbuf[16];
+            k_itoa((int)node->size, sbuf);
+            vga_puts(sbuf);
+            vga_puts(" B\n");
+            count++;
+        }
+    }
+    if (count == 0) {
+        vga_puts("  (No files found)\n");
+    }
+    vga_puts("\n");
+}
+
+static void cmd_cat(const char *filename) {
+    if (k_strlen(filename) == 0) {
+        vga_puts_color("  Usage: cat <filename>\n", VGA_LIGHT_RED, VGA_BLACK);
+        return;
+    }
+
+    int fd = fs_open(filename);
+    if (fd < 0) {
+        vga_puts_color("  File not found: ", VGA_LIGHT_RED, VGA_BLACK);
+        vga_puts(filename);
+        vga_puts("\n");
+        return;
+    }
+
+    char content_buf[FS_MAX_FILESIZE];
+    int bytes = fs_read(fd, content_buf, sizeof(content_buf));
+    if (bytes >= 0) {
+        vga_puts("\n");
+        vga_puts_color(content_buf, VGA_LIGHT_GREEN, VGA_BLACK);
+        vga_puts("\n");
+    }
 }
 
 /* ---------------------------------------------------------------------------
@@ -313,8 +353,7 @@ static void cmd_help(void) {
     vga_puts("  test_mutex  - [L10] Run myglobal race condition test\n");
     vga_puts("  test_pc     - [L10] Run Bounded-Buffer Producer/Consumer test\n");
     vga_puts("  free        - [L11] PMM status and frame reuse test\n");
-    vga_puts_color("\n  Upcoming Milestone:\n", VGA_DARK_GREY, VGA_BLACK);
-    vga_puts("  ls          - [L12] List files\n");
+    vga_puts("  ls          - [L12] List files in RAM disk\n");
     vga_puts("  cat         - [L12] Print file contents\n\n");
 }
 
@@ -362,7 +401,6 @@ static void shell_run(void) {
         vga_puts_color(prompt, VGA_LIGHT_GREEN, VGA_BLACK);
         kb_readline(shell_buf, sizeof(shell_buf));
 
-        /* 1. Strip all trailing CR, LF, and whitespace */
         size_t len = k_strlen(shell_buf);
         while (len > 0 && (shell_buf[len - 1] == '\n' || 
                            shell_buf[len - 1] == '\r' || 
@@ -372,11 +410,9 @@ static void shell_run(void) {
             len--;
         }
 
-        /* 2. Trim leading whitespace */
         const char *cmd = k_ltrim(shell_buf);
         if (k_strlen(cmd) == 0) continue;
 
-        /* Core Stage 0 commands */
         if (k_strcmp(cmd, "help")  == 0) { cmd_help();  continue; }
         if (k_strcmp(cmd, "clear") == 0) { cmd_clear(); continue; }
         if (k_strcmp(cmd, "about") == 0) { cmd_about(); continue; }
@@ -392,7 +428,6 @@ static void shell_run(void) {
             continue;
         }
 
-        /* Prefix-tolerant matching to guarantee command dispatch */
         if (k_strncmp(cmd, "ps", 2) == 0) {
             cmd_ps();
             continue;
@@ -409,15 +444,26 @@ static void shell_run(void) {
             cmd_test_pc();
             continue;
         }
+
         if (k_strncmp(cmd, "free", 4) == 0) {
             cmd_free();
             continue;
         }
 
-        /* Upcoming milestone stubs */
-        if (k_strcmp(cmd, "kill") == 0 ||
-            k_strcmp(cmd, "ls")   == 0 ||
-            k_strcmp(cmd, "cat")  == 0) {
+        if (k_strcmp(cmd, "ls") == 0) {
+            cmd_ls();
+            continue;
+        }
+        if (k_strcmp(cmd, "cat") == 0) {
+            cmd_cat("");
+            continue;
+        }
+        if (k_strncmp(cmd, "cat ", 4) == 0) {
+            cmd_cat(k_ltrim(cmd + 4));
+            continue;
+        }
+
+        if (k_strcmp(cmd, "kill") == 0) {
             vga_puts_color("  [TODO] This command is not yet implemented.\n",
                            VGA_YELLOW, VGA_BLACK);
             continue;
@@ -429,7 +475,7 @@ static void shell_run(void) {
     }
 }
 
-/* Background tasks for verifying Round-Robin task switching */
+
 static void task_worker_a(void) {
     while (1) {
         for (volatile int i = 0; i < 20000000; i++);
@@ -442,7 +488,6 @@ static void task_worker_b(void) {
     }
 }
 
-/* Static thread descriptor representing the interactive shell context */
 static thread_t main_shell_thread;
 
 /* ---------------------------------------------------------------------------
@@ -454,19 +499,17 @@ void kernel_main(void) {
     print_splash();
     idt_init();
 
-    /* 1. Stage 3: Initialise Physical Memory Manager with 16 MB RAM */
     pmm_init(16 * 1024 * 1024);
 
-    /* 2. Stage 1: Register primary interactive shell as PID 1 */
+    fs_init();
+
     create_process("ksh", 0, 1);
     current_process = &process_table[0];
     current_process->state = PROC_RUNNING;
 
-    /* 3. Create Stage 1 background worker processes */
     create_process("worker_a", task_worker_a, 2);
     create_process("worker_b", task_worker_b, 2);
 
-    /* 4. Stage 2: Initialise thread subsystem and bind foreground thread */
     thread_init();
     main_shell_thread.tid = 1;
     main_shell_thread.state = THREAD_RUNNING;
@@ -474,9 +517,7 @@ void kernel_main(void) {
     main_shell_thread.next_wait = 0;
     current_thread = &main_shell_thread;
 
-    /* 5. Start interactive shell (commands execute on demand when typed) */
     shell_run();
 
-    /* Should never reach here */
     __asm__ __volatile__("hlt");
 }
